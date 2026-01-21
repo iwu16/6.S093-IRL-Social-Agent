@@ -17,6 +17,8 @@ class Config:
     mastodon_token: str  # For future use (manual posting reference)
     mastodon_instance: str
     replicate_api_token: str  # For image generation
+    telegram_bot_token: str  # For HITL approval workflow
+    telegram_chat_id: str  # Your Telegram chat ID
 
     @classmethod
     def from_env(cls) -> "Config":
@@ -40,6 +42,8 @@ class Config:
             mastodon_token=os.getenv("MASTODON_TOKEN", ""),  # Optional for now
             mastodon_instance=os.getenv("MASTODON_INSTANCE", "https://mastodon.social"),
             replicate_api_token=os.getenv("REPLICATE_API_TOKEN", ""),  # Optional for images
+            telegram_bot_token=os.getenv("TELEGRAM_BOT_TOKEN", ""),  # Optional for HITL
+            telegram_chat_id=os.getenv("TELEGRAM_CHAT_ID", ""),  # Optional for HITL
         )
 
 

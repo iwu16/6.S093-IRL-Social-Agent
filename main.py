@@ -9,12 +9,14 @@ A prototype agent that:
 """
 
 import argparse
+import asyncio
 import json
 from config import Config
 from notion_client import NotionClient, format_documents_as_context
 from llm_client import LLMClient
 from mastodon_client import MastodonClient
 from replicate_client import ReplicateClient
+from telegram_hitl import TelegramHITL
 from prompts import SYSTEM_PROMPT, build_user_prompt, build_reply_prompt
 from schemas import PostBatch, SocialPost, ReplyBatch, Reply, SAMPLE_RESPONSE
 
@@ -217,6 +219,139 @@ def export_as_json(batch: PostBatch, filename: str = "output.json") -> None:
     print(f"\nExported to {filename}")
 
 
+async def post_with_telegram_approval(
+    config: Config,
+    batch: PostBatch,
+    with_image: bool = False
+) -> None:
+    """
+    Post to Mastodon with Telegram HITL approval.
+
+    Each post is sent to Telegram for approval before posting.
+    Supports: Approve, Edit, Reject actions.
+
+    Args:
+        config: Application configuration
+        batch: PostBatch containing generated posts
+        with_image: Whether to generate and attach mascot images
+    """
+    # Check Telegram credentials
+    if not config.telegram_bot_token or not config.telegram_chat_id:
+        print("\nNo Telegram credentials configured.")
+        print("Set TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID in .env for HITL approval.")
+        return
+
+    # Check Mastodon credentials
+    if not config.mastodon_token:
+        print("\nNo Mastodon token configured. Set MASTODON_TOKEN in .env to enable posting.")
+        return
+
+    # Initialize clients
+    hitl = TelegramHITL(
+        bot_token=config.telegram_bot_token,
+        chat_id=config.telegram_chat_id
+    )
+
+    mastodon = MastodonClient(
+        token=config.mastodon_token,
+        instance=config.mastodon_instance
+    )
+
+    replicate = None
+    if with_image:
+        if not config.replicate_api_token:
+            print("\nNo Replicate API token configured. Continuing without images.")
+        else:
+            replicate = ReplicateClient(api_token=config.replicate_api_token)
+
+    # Verify Mastodon credentials
+    print(f"\nConnecting to {config.mastodon_instance}...")
+    if not mastodon.verify_credentials():
+        print("Failed to verify Mastodon credentials. Check your token.")
+        return
+    print("Connected to Mastodon!")
+
+    # Send notification to Telegram
+    await hitl.send_notification(
+        f"🚀 New batch of {len(batch.posts)} posts ready for review!\n"
+        f"Topic: {batch.topic}"
+    )
+
+    posted_count = 0
+    edited_count = 0
+    rejected_count = 0
+    feedback_log = []
+
+    total_posts = len(batch.posts)
+
+    for i, post in enumerate(batch.posts, 1):
+        print(f"\n--- Processing Post {i}/{total_posts} ---")
+
+        # Request approval via Telegram
+        result = await hitl.request_approval(
+            post_text=post.text,
+            post_index=i,
+            total_posts=total_posts,
+            topic=batch.topic,
+            tone=post.tone.value,
+        )
+
+        if result.decision == "approve":
+            # Post as-is
+            print("✅ Approved! Posting to Mastodon...")
+            post_result = mastodon.post_status(post.text)
+
+            if post_result.success:
+                print(f"Posted! {post_result.url}")
+                posted_count += 1
+            else:
+                print(f"Failed to post: {post_result.error}")
+
+        elif result.decision == "edit":
+            # Post the edited version
+            edited_text = result.edited_text
+            print(f"✏️ Edited! Posting modified version...")
+
+            post_result = mastodon.post_status(edited_text)
+
+            if post_result.success:
+                print(f"Posted edited version! {post_result.url}")
+                posted_count += 1
+                edited_count += 1
+            else:
+                print(f"Failed to post: {post_result.error}")
+
+        elif result.decision == "reject":
+            # Log the rejection
+            print(f"❌ Rejected. Reason: {result.rejection_reason}")
+            rejected_count += 1
+            feedback_log.append({
+                "post": post.text[:100],
+                "reason": result.rejection_reason,
+            })
+
+    # Summary
+    print("\n" + "=" * 60)
+    print("HITL APPROVAL SUMMARY")
+    print("=" * 60)
+    print(f"✅ Posted: {posted_count}")
+    print(f"✏️ Edited: {edited_count}")
+    print(f"❌ Rejected: {rejected_count}")
+
+    if feedback_log:
+        print("\n📝 Rejection Feedback:")
+        for item in feedback_log:
+            print(f"  - {item['reason']}")
+
+    # Send summary to Telegram
+    await hitl.send_notification(
+        f"📊 Batch Complete!\n\n"
+        f"✅ Posted: {posted_count}\n"
+        f"✏️ Edited: {edited_count}\n"
+        f"❌ Rejected: {rejected_count}"
+    )
+
+
 def search_and_reply(config: Config, context: str, keyword: str) -> None:
     """
     Search for posts by keyword and generate/post replies.
@@ -371,6 +506,11 @@ def main():
         help="Enable mascot image generation (requires REPLICATE_API_TOKEN)"
     )
     parser.add_argument(
+        "--hitl",
+        action="store_true",
+        help="Use Telegram for human-in-the-loop approval (requires TELEGRAM_BOT_TOKEN)"
+    )
+    parser.add_argument(
         "--reply",
         type=str,
         metavar="KEYWORD",
@@ -409,7 +549,14 @@ def main():
 
         # Step 5: Interactive posting to Mastodon
         if args.post:
-            post_to_mastodon_interactive(config, batch, with_image=args.with_image)
+            if args.hitl:
+                # Use Telegram HITL approval
+                asyncio.run(post_with_telegram_approval(
+                    config, batch, with_image=args.with_image
+                ))
+            else:
+                # Use CLI interactive approval
+                post_to_mastodon_interactive(config, batch, with_image=args.with_image)
 
         # Step 6: Reply mode - search and reply to posts
         if args.reply:
