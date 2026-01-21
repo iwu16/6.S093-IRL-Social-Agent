@@ -16,6 +16,7 @@ class Config:
     openrouter_api_key: str
     mastodon_token: str  # For future use (manual posting reference)
     mastodon_instance: str
+    replicate_api_token: str  # For image generation
 
     @classmethod
     def from_env(cls) -> "Config":
@@ -38,6 +39,7 @@ class Config:
             openrouter_api_key=os.getenv("OPENROUTER_API_KEY", ""),
             mastodon_token=os.getenv("MASTODON_TOKEN", ""),  # Optional for now
             mastodon_instance=os.getenv("MASTODON_INSTANCE", "https://mastodon.social"),
+            replicate_api_token=os.getenv("REPLICATE_API_TOKEN", ""),  # Optional for images
         )
 
 

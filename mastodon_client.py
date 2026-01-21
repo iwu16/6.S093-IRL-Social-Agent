@@ -42,12 +42,73 @@ class MastodonClient:
         self.instance = instance.rstrip("/")
         self.api_base = f"{self.instance}/api/v1"
 
+    def upload_media(self, image_url: str, description: str = "") -> Optional[str]:
+        """
+        Upload media from a URL to Mastodon.
+
+        Args:
+            image_url: URL of the image to upload
+            description: Alt text for the image
+
+        Returns:
+            Media ID if successful, None otherwise
+        """
+        if not self.token:
+            return None
+
+        # First, download the image
+        try:
+            with httpx.Client(timeout=60.0) as client:
+                img_response = client.get(image_url)
+                if img_response.status_code != 200:
+                    print(f"DEBUG: Failed to download image: HTTP {img_response.status_code}")
+                    return None
+
+                image_data = img_response.content
+                content_type = img_response.headers.get("content-type", "image/webp")
+
+                # Upload to Mastodon
+                url = f"{self.api_base}/media"
+                headers = {"Authorization": f"Bearer {self.token}"}
+
+                # Determine file extension from content type
+                ext = "webp"
+                if "png" in content_type:
+                    ext = "png"
+                elif "jpeg" in content_type or "jpg" in content_type:
+                    ext = "jpg"
+
+                files = {
+                    "file": (f"image.{ext}", image_data, content_type),
+                }
+                data = {}
+                if description:
+                    data["description"] = description
+
+                response = client.post(url, headers=headers, files=files, data=data)
+
+                if response.status_code in (200, 202):
+                    media_data = response.json()
+                    return media_data.get("id")
+                else:
+                    print(f"DEBUG: Media upload failed: HTTP {response.status_code}")
+                    try:
+                        print(f"DEBUG: {response.json()}")
+                    except Exception:
+                        pass
+                    return None
+
+        except Exception as e:
+            print(f"DEBUG: Media upload error: {e}")
+            return None
+
     def post_status(
         self,
         text: str,
         visibility: str = "public",
         sensitive: bool = False,
         spoiler_text: Optional[str] = None,
+        media_ids: Optional[List[str]] = None,
     ) -> PostResult:
         """
         Post a status to Mastodon.
@@ -57,6 +118,7 @@ class MastodonClient:
             visibility: One of 'public', 'unlisted', 'private', 'direct'
             sensitive: Mark as sensitive content
             spoiler_text: Content warning text (if any)
+            media_ids: List of media IDs to attach
 
         Returns:
             PostResult with success status and post details
@@ -82,6 +144,8 @@ class MastodonClient:
             payload["sensitive"] = True
         if spoiler_text:
             payload["spoiler_text"] = spoiler_text
+        if media_ids:
+            payload["media_ids"] = media_ids
 
         try:
             with httpx.Client(timeout=30.0) as client:

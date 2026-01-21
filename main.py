@@ -14,6 +14,7 @@ from config import Config
 from notion_client import NotionClient, format_documents_as_context
 from llm_client import LLMClient
 from mastodon_client import MastodonClient
+from replicate_client import ReplicateClient
 from prompts import SYSTEM_PROMPT, build_user_prompt, build_reply_prompt
 from schemas import PostBatch, SocialPost, ReplyBatch, Reply, SAMPLE_RESPONSE
 
@@ -95,26 +96,35 @@ def display_posts_for_review(batch: PostBatch) -> None:
     print("=" * 60)
 
 
-def post_to_mastodon_interactive(config: Config, batch: PostBatch) -> None:
+def post_to_mastodon_interactive(config: Config, batch: PostBatch, with_image: bool = False) -> None:
     """
     Interactively approve and post each generated post to Mastodon.
 
     Args:
         config: Application configuration
         batch: PostBatch containing generated posts
+        with_image: Whether to generate and attach mascot images
     """
     if not config.mastodon_token:
         print("\nNo Mastodon token configured. Set MASTODON_TOKEN in .env to enable posting.")
         return
 
-    client = MastodonClient(
+    mastodon = MastodonClient(
         token=config.mastodon_token,
         instance=config.mastodon_instance
     )
 
+    replicate = None
+    if with_image:
+        if not config.replicate_api_token:
+            print("\nNo Replicate API token configured. Set REPLICATE_API_TOKEN in .env for images.")
+            print("Continuing without images...\n")
+        else:
+            replicate = ReplicateClient(api_token=config.replicate_api_token)
+
     # Verify credentials first
     print(f"\nConnecting to {config.mastodon_instance}...")
-    if not client.verify_credentials():
+    if not mastodon.verify_credentials():
         print("Failed to verify Mastodon credentials. Check your token.")
         return
 
@@ -129,17 +139,56 @@ def post_to_mastodon_interactive(config: Config, batch: PostBatch) -> None:
         print("-" * 40)
 
         while True:
-            choice = input("\nPost this to Mastodon? [y]es / [n]o / [q]uit: ").strip().lower()
+            if replicate:
+                choice = input("\nPost this to Mastodon? [y]es / [n]o / [i]mage / [q]uit: ").strip().lower()
+            else:
+                choice = input("\nPost this to Mastodon? [y]es / [n]o / [q]uit: ").strip().lower()
 
             if choice in ("y", "yes"):
                 print("Posting...")
-                result = client.post_status(post.text)
+                result = mastodon.post_status(post.text)
 
                 if result.success:
                     print(f"Posted! {result.url}")
                     posted_count += 1
                 else:
                     print(f"Failed to post: {result.error}")
+                break
+
+            elif choice in ("i", "image") and replicate:
+                print("Generating mascot image...")
+                img_result = replicate.generate_mascot_image(post.text)
+
+                if img_result.success:
+                    print(f"Image generated: {img_result.image_url}")
+                    print("Uploading to Mastodon...")
+
+                    media_id = mastodon.upload_media(
+                        img_result.image_url,
+                        description="IRL raccoon mascot"
+                    )
+
+                    if media_id:
+                        print("Posting with image...")
+                        result = mastodon.post_status(post.text, media_ids=[media_id])
+
+                        if result.success:
+                            print(f"Posted with image! {result.url}")
+                            posted_count += 1
+                        else:
+                            print(f"Failed to post: {result.error}")
+                    else:
+                        print("Failed to upload image. Posting without image...")
+                        result = mastodon.post_status(post.text)
+                        if result.success:
+                            print(f"Posted! {result.url}")
+                            posted_count += 1
+                        else:
+                            print(f"Failed to post: {result.error}")
+                else:
+                    print(f"Image generation failed: {img_result.error}")
+                    print("You can still post without an image.")
+                    continue
                 break
 
             elif choice in ("n", "no"):
@@ -153,7 +202,10 @@ def post_to_mastodon_interactive(config: Config, batch: PostBatch) -> None:
                 return
 
             else:
-                print("Please enter 'y', 'n', or 'q'")
+                if replicate:
+                    print("Please enter 'y', 'n', 'i', or 'q'")
+                else:
+                    print("Please enter 'y', 'n', or 'q'")
 
     print(f"\nAll done! {posted_count} posted, {skipped_count} skipped")
 
@@ -314,6 +366,11 @@ def main():
         help="Interactively post approved content to Mastodon"
     )
     parser.add_argument(
+        "--with-image",
+        action="store_true",
+        help="Enable mascot image generation (requires REPLICATE_API_TOKEN)"
+    )
+    parser.add_argument(
         "--reply",
         type=str,
         metavar="KEYWORD",
@@ -352,7 +409,7 @@ def main():
 
         # Step 5: Interactive posting to Mastodon
         if args.post:
-            post_to_mastodon_interactive(config, batch)
+            post_to_mastodon_interactive(config, batch, with_image=args.with_image)
 
         # Step 6: Reply mode - search and reply to posts
         if args.reply:
