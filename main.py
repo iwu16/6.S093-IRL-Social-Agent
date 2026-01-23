@@ -19,6 +19,7 @@ from replicate_client import ReplicateClient
 from telegram_hitl import TelegramHITL
 from prompts import SYSTEM_PROMPT, build_user_prompt, build_reply_prompt
 from schemas import PostBatch, SocialPost, ReplyBatch, Reply, SAMPLE_RESPONSE
+from rag_client import RAGClient
 
 
 def fetch_company_context(config: Config) -> str:
@@ -40,20 +41,93 @@ def fetch_company_context(config: Config) -> str:
     return format_documents_as_context(documents)
 
 
-def generate_posts(config: Config, context: str, topic: str, num_posts: int = 5) -> PostBatch:
+def fetch_context_with_rag(config: Config, query: str, top_k: int = 5) -> str:
+    """
+    Fetch relevant context using RAG (hybrid search).
+
+    Args:
+        config: Application configuration
+        query: The topic/query to search for
+        top_k: Number of relevant chunks to retrieve
+
+    Returns:
+        Formatted context string with only relevant chunks
+    """
+    print(f"Searching for relevant context with RAG (query: '{query}')...")
+
+    rag = RAGClient()
+    context = rag.search(query, top_k=top_k)
+
+    if not context:
+        print("  No relevant context found in RAG database.")
+        print("  Run 'python rag_client.py --embed' to embed Notion documents first.")
+        return ""
+
+    # Count chunks retrieved
+    chunk_count = context.count("---")
+    print(f"  Retrieved {chunk_count} relevant chunks")
+
+    return context
+
+
+def embed_notion_documents(config: Config) -> int:
+    """
+    Fetch Notion documents and embed them into the RAG database.
+
+    Args:
+        config: Application configuration
+
+    Returns:
+        Number of chunks embedded
+    """
+    print("Fetching Notion documents for embedding...")
+
+    client = NotionClient(token=config.notion_token)
+    documents = client.fetch_all_documents(config.notion_page_id)
+
+    print(f"  Retrieved {len(documents)} documents")
+    for doc in documents:
+        print(f"    - {doc.title}")
+
+    print("\nEmbedding documents into RAG database...")
+    rag = RAGClient()
+    total_chunks = rag.embed_notion_documents(documents)
+
+    print(f"\nEmbedded {total_chunks} chunks from {len(documents)} documents")
+    return total_chunks
+
+
+def generate_posts(
+    config: Config,
+    context: str,
+    topic: str,
+    num_posts: int = 5,
+    use_rag: bool = False,
+    rag_top_k: int = 5,
+) -> PostBatch:
     """
     Generate social media posts using LLM with company context.
 
     Args:
         config: Application configuration
-        context: Formatted company documents
+        context: Formatted company documents (ignored if use_rag=True)
         topic: Topic for post generation
         num_posts: Number of posts to generate
+        use_rag: If True, use RAG to retrieve relevant context
+        rag_top_k: Number of chunks to retrieve when using RAG
 
     Returns:
         Validated PostBatch with generated posts
     """
+    # If RAG is enabled, fetch relevant context instead of using all docs
+    if use_rag:
+        context = fetch_context_with_rag(config, topic, top_k=rag_top_k)
+        if not context:
+            print("Warning: No RAG context found. Falling back to full context.")
+            context = fetch_company_context(config)
+
     print(f"\nGenerating {num_posts} posts about: '{topic}'...")
+    print(f"  Context length: {len(context)} characters")
 
     client = LLMClient(api_key=config.openrouter_api_key)
 
@@ -516,6 +590,22 @@ def main():
         metavar="KEYWORD",
         help="Search for posts by keyword and generate replies"
     )
+    parser.add_argument(
+        "--rag",
+        action="store_true",
+        help="Use RAG to retrieve only relevant context (requires embeddings)"
+    )
+    parser.add_argument(
+        "--embed",
+        action="store_true",
+        help="Embed Notion documents into RAG database (run once before using --rag)"
+    )
+    parser.add_argument(
+        "--rag-top-k",
+        type=int,
+        default=5,
+        help="Number of relevant chunks to retrieve with RAG (default: 5)"
+    )
 
     args = parser.parse_args()
 
@@ -529,15 +619,29 @@ def main():
         # Load configuration
         config = Config.from_env()
 
-        # Step 1: Fetch company context from Notion
-        context = fetch_company_context(config)
+        # Embed mode: just embed documents and exit
+        if args.embed:
+            embed_notion_documents(config)
+            print("\nEmbedding complete! You can now use --rag flag for post generation.")
+            return 0
+
+        # Step 1: Fetch company context
+        if args.rag:
+            # RAG mode: context will be fetched during generate_posts
+            context = ""
+            print("Using RAG for context retrieval...")
+        else:
+            # Traditional mode: fetch ALL documents
+            context = fetch_company_context(config)
 
         # Step 2: Generate posts with LLM
         batch = generate_posts(
             config=config,
             context=context,
             topic=args.topic,
-            num_posts=args.num_posts
+            num_posts=args.num_posts,
+            use_rag=args.rag,
+            rag_top_k=args.rag_top_k,
         )
 
         # Step 3: Display for human review
